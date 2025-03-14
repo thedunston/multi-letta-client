@@ -1,0 +1,560 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Letta Multi-Agent View</title>
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <link rel="stylesheet" href="/static/style.css">
+    <style>
+   
+    </style>
+</head>
+<body class="dark-theme">
+    <div class="top-controls">
+        <div class="theme-toggle" onclick="toggleTheme()">
+            <span class="theme-icon">🌓</span>
+        </div>
+        <div class="proxy-input-container">
+            <input type="text" id="proxy-input" class="proxy-input" placeholder="Enter API endpoint...">
+            <button class="proxy-button" onclick="validateEndpoint()">Connect</button>
+        </div>
+        <div id="agent-selector">
+            <select id="agent-select" class="agent-select" onchange="handleAgentSelection(this)">
+                <option value="">Select an agent...</option>
+            </select>
+        </div>
+    </div>
+    <div class="selected-agents">
+        <div id="active-agents-list"></div>
+    </div>
+    <div id="agent-containers" class="multi-agent-grid"></div>
+    <script>
+        const MAX_AGENTS = 6;
+        const activeAgents = new Map();
+        const pollingIntervals = new Map();
+        let endpoint = localStorage.getItem('apiEndpoint') || 'http://localhost:8284';
+
+        /**
+         * Creates and adds a new agent chat container to the interface
+         * @param {string} agentId - The unique identifier for the agent
+         * @param {string} agentName - The display name of the agent
+         */
+        function addAgentContainer(agentId, agentName) {
+            const container = document.createElement('div');
+            container.className = 'agent-container';
+            container.id = `agent-${agentId}`;
+            container.innerHTML = `
+                <h3>${agentName}</h3>
+                <div class="agent-messages" id="messages-${agentId}"></div>
+                <div class="typing-indicator" id="typing-indicator-${agentId}" style="display: none;">Agent is typing...</div>
+                <div class="input-container">
+                    <textarea class="message-input" id="input-${agentId}" 
+                              placeholder="Type message for ${agentName}..."></textarea>
+                    <button class="send-button" onclick="sendMessage('${agentId}')">Send</button>
+                </div>
+            `;
+            
+            const agentContainers = document.getElementById('agent-containers');
+            
+            agentContainers.appendChild(container);
+            
+            // Add enter key handler for the message input
+            const input = document.getElementById(`input-${agentId}`);
+            input.addEventListener('keypress', function(e) {
+                if (e.key === 'Enter' && !e.shiftKey) {
+                    e.preventDefault();
+                    sendMessage(agentId);
+                }
+            });
+            
+            // Update the grid layout based on the number of active agents
+            updateGridLayout(activeAgents.size + 1);
+        }
+
+        /**
+         * Removes an agent's chat container from the interface
+         * @param {string} agentId - The unique identifier for the agent to remove
+         */
+        function removeAgentContainer(agentId) {
+            const container = document.getElementById(`agent-${agentId}`);
+            if (container) {
+                container.remove();
+                activeAgents.delete(agentId);
+                updateAgentList();
+                // Update the grid layout after removing an agent
+                updateGridLayout();
+            }
+        }
+
+        /**
+         * Validates the API endpoint and updates the UI accordingly
+         * @async
+         */
+        async function validateEndpoint() {
+                const input = document.getElementById('proxy-input');
+                endpoint = input.value.trim();
+                if (!endpoint) {
+                    alert('Please enter a valid endpoint.');
+                    return;
+                }
+
+                try {
+                    const response = await fetch(`${endpoint}/health`);
+                    if (response.ok) {
+                        input.style.borderColor = 'green';
+                        input.style.color = 'green';
+                        input.style.transition = 'border-color 0.3s, color 0.3s';
+                        setTimeout(() => {
+                            input.style.borderColor = '';
+                            input.style.color = '';
+                        }, 3000);
+                        localStorage.setItem('apiEndpoint', endpoint);
+                        fetchAgents();
+                    } else {
+                        input.style.borderColor = 'red';
+                        input.style.color = 'red';
+                        input.style.transition = 'border-color 0.3s, color 0.3s';
+                        input.placeholder = 'Connection failed. Please try again.';
+                    }
+                } catch (error) {
+                    input.style.borderColor = 'red';
+                    input.style.color = 'red';
+                    input.style.transition = 'border-color 0.3s, color 0.3s';
+                    input.placeholder = 'Connection failed. Please try again.';
+                    console.error('Error validating endpoint:', error);
+                }
+            }
+
+        
+        /**
+         * Updates the grid layout of agent containers based on the number of active agents
+         */
+        function updateGridLayout() {
+            const agentContainers = document.getElementById('agent-containers');
+            const agents = agentContainers.querySelectorAll('.agent-container');
+            const count = agents.length;
+            
+            // Always use 3 columns, 2 rows max
+            agentContainers.style.gridTemplateColumns = 'repeat(3, minmax(0, 1fr))';
+            
+            if (count <= 3) {
+                // 1-3 agents: single row
+                agentContainers.style.gridTemplateRows = '1fr';
+            } else {
+                // 4-6 agents: two rows
+                agentContainers.style.gridTemplateRows = 'repeat(2, 1fr)';
+            }
+            
+            // Reset any specific positioning
+            agents.forEach(agent => {
+                agent.style.gridColumn = '';
+                agent.style.gridRow = '';
+            });
+            
+            // For 4 agents, position the 4th in first column of second row
+            if (count === 4) {
+                agents[3].style.gridColumn = '1';
+                agents[3].style.gridRow = '2';
+            }
+            // For 5 agents, position 4th and 5th in first and second columns of second row
+            else if (count === 5) {
+                agents[3].style.gridColumn = '1';
+                agents[3].style.gridRow = '2';
+                agents[4].style.gridColumn = '2';
+                agents[4].style.gridRow = '2';
+            }
+        }
+
+        /**
+         * Loads chat history for a specific agent from local storage
+         * @param {string} agentId - The unique identifier for the agent
+         */
+        function loadChatHistory(agentId) {
+            const key = `chatHistory_${agentId}`;
+            const history = JSON.parse(localStorage.getItem(key) || '[]');
+            const chatWindow = document.getElementById(`messages-${agentId}`);
+            if (chatWindow) {
+                chatWindow.innerHTML = history.join('');
+                chatWindow.scrollTop = chatWindow.scrollHeight;
+            }
+        }
+
+        /**
+         * Fetches messages for a specific agent from the server
+         * @async
+         * @param {string} agentId - The unique identifier for the agent
+         */
+        async function fetchMessages(agentId) {
+            try {
+                const response = await fetch(`${endpoint}/agents/${agentId}/messages`);
+                if (!response.ok) throw new Error('Failed to fetch messages');
+                
+                const messages = await response.json();
+                
+                // Get agent info
+                const agentInfo = activeAgents.get(agentId) || {};
+                const lastKnownMessageId = agentInfo.lastMessageId;
+                
+                // Update the chat window with latest messages
+                updateChatWindow(agentId, messages);
+                
+                // Get the last message to handle typing indicator
+                const lastMessage = messages[messages.length - 1];
+                if (lastMessage) {
+                    // Store the last message ID
+                    activeAgents.get(agentId).lastMessageId = lastMessage.id;
+                    
+                    // Check if this is a new message (compared to our last known message)
+                    const isNewMessage = lastMessage.id !== lastKnownMessageId;
+                    
+                    // Only show typing indicator if the last message is from user and there's no assistant response yet
+                    if (lastMessage.message_type === 'user_message') {
+                        const hasAssistantResponse = messages.some(msg => 
+                            msg.message_type === 'assistant_message' && 
+                            new Date(msg.date) > new Date(lastMessage.date)
+                        );
+                        
+                        if (!hasAssistantResponse) {
+                            showTypingIndicator(agentId);
+                        } else {
+                            hideTypingIndicator(agentId);
+                        }
+                    } else {
+                        // Hide typing indicator for all other message types
+                        hideTypingIndicator(agentId);
+                    }
+                } else {
+                    hideTypingIndicator(agentId);
+                }
+            } catch (error) {
+                console.error('Error fetching messages:', error);
+                hideTypingIndicator(agentId);
+            }
+        }
+
+        /**
+         * Starts polling for new messages for a specific agent
+         * @param {string} agentId - The unique identifier for the agent
+         */
+        function startPolling(agentId) {
+            // Poll every 1.5 seconds for more responsive updates
+            const interval = setInterval(() => {
+                fetchMessages(agentId);
+            }, 1500);
+            pollingIntervals.set(agentId, interval);
+        }
+
+        /**
+         * Stops polling for new messages for a specific agent
+         * @param {string} agentId - The unique identifier for the agent
+         */
+        function stopPolling(agentId) {
+            const interval = pollingIntervals.get(agentId);
+            if (interval) {
+                clearInterval(interval);
+            }
+            pollingIntervals.delete(agentId);
+        }
+
+        /**
+         * Sends a message to a specific agent
+         * @async
+         * @param {string} agentId - The unique identifier for the agent
+         */
+        async function sendMessage(agentId) {
+                const input = document.getElementById(`input-${agentId}`);
+                const message = input.value.trim();
+                if (!message) return;
+
+                const chatWindow = document.getElementById(`messages-${agentId}`);
+                const timestamp = new Date().toLocaleString();
+                const userMessageHtml = `<div class="message user-message">
+                    ${message}
+                    <div class="message-timestamp">Sent: ${timestamp}</div>
+                </div>`;
+                
+                // Add to chat window
+                chatWindow.innerHTML += userMessageHtml;
+                chatWindow.scrollTop = chatWindow.scrollHeight;
+                
+                // Clear input
+                input.value = '';
+                
+                // Show typing indicator immediately
+                showTypingIndicator(agentId);
+
+                try {
+                    const response = await fetch(`${endpoint}/agents/${agentId}/messages`, {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                        },
+                        body: JSON.stringify({
+                            messages: [{
+                                role: 'user',
+                                content: message
+                            }]
+                        })
+                    });
+
+                    if (!response.ok) {
+                        throw new Error('Failed to send message');
+                    }
+
+                    // Immediately fetch messages to get any quick responses
+                    setTimeout(() => fetchMessages(agentId), 500);
+                    
+                    // The typing indicator will be managed by the fetchMessages function
+                } catch (error) {
+                    console.error('Error sending message:', error);
+                    hideTypingIndicator(agentId);
+                    
+                    const errorHtml = `<div class="message error-message">Error: ${error.message}</div>`;
+                    chatWindow.innerHTML += errorHtml;
+                    chatWindow.scrollTop = chatWindow.scrollHeight;
+                }
+            }
+
+            
+        /**
+         * Shows the typing indicator for a specific agent
+         * @param {string} agentId - The unique identifier for the agent
+         */
+        function showTypingIndicator(agentId) {
+            const indicator = document.getElementById(`typing-indicator-${agentId}`);
+            if (indicator) indicator.style.display = 'block';
+        }
+
+        /**
+         * Hides the typing indicator for a specific agent
+         * @param {string} agentId - The unique identifier for the agent
+         */
+        function hideTypingIndicator(agentId) {
+            const indicator = document.getElementById(`typing-indicator-${agentId}`);
+            if (indicator) indicator.style.display = 'none';
+        }
+
+        /**
+         * Handles the selection of an agent from the dropdown
+         * @param {HTMLSelectElement} select - The select element containing agent options
+         */
+        function handleAgentSelection(select) {
+            const agentId = select.value;
+            if (!agentId) return;
+        
+            const agentName = select.options[select.selectedIndex].dataset.name;
+            if (activeAgents.has(agentId)) {
+                // Agent already selected
+                select.value = '';
+                return;
+            }
+
+            if (activeAgents.size >= MAX_AGENTS) {
+                alert(`You can only monitor up to ${MAX_AGENTS} agents at once.`);
+                select.value = '';
+                return;
+            }
+        
+            addAgentContainer(agentId, agentName);
+            activeAgents.set(agentId, { name: agentName, visible: true });
+            loadChatHistory(agentId);
+            fetchMessages(agentId);
+            startPolling(agentId);
+            updateAgentList();
+        
+            // Reset the dropdown
+            select.value = '';
+        }
+
+        /**
+         * Toggles the visibility of an agent's chat container
+         * @param {string} agentId - The unique identifier for the agent
+         */
+        function toggleAgentVisibility(agentId) {
+            const agentInfo = activeAgents.get(agentId);
+            if (!agentInfo) return;
+            
+            agentInfo.visible = !agentInfo.visible;
+            const container = document.getElementById(`agent-${agentId}`);
+            if (container) {
+                container.style.display = agentInfo.visible ? 'flex' : 'none';
+            }
+            updateAgentList();
+        }
+
+        /**
+         * Removes an agent and stops all associated polling
+         * @param {string} agentId - The unique identifier for the agent
+         */
+        function removeAgent(agentId) {
+            stopPolling(agentId);
+            removeAgentContainer(agentId);
+            updateAgentList();
+        }
+
+        /**
+         * Updates the list of active agents in the UI
+         */
+        function updateAgentList() {
+            const agentList = document.getElementById('active-agents-list');
+            if (!agentList) return;
+            
+            agentList.innerHTML = Array.from(activeAgents.entries())
+                .map(([agentId, agentInfo]) => `
+                    <div class="agent-tag">
+                        <span>${agentInfo.name}</span>
+                        <button onclick="toggleAgentVisibility('${agentId}')">
+                            ${agentInfo.visible ? 'Hide' : 'Show'}
+                        </button>
+                        <button class="remove-btn" onclick="removeAgent('${agentId}')" title="Remove agent">
+                            &times;
+                        </button>
+                    </div>
+                `)
+                .join('');
+        }
+
+        /**
+         * Updates the chat window with new messages
+         * @param {string} agentId - The unique identifier for the agent
+         * @param {Array} messages - Array of message objects to display
+         */
+        function updateChatWindow(agentId, messages) {
+            const chatWindow = document.getElementById(`messages-${agentId}`);
+            if (!chatWindow) return;
+
+            // Create a map of messages by ID for quick lookup
+            const messageMap = new Map();
+            messages.forEach(msg => messageMap.set(msg.id, msg));
+
+            // Group messages by ID to pair assistant messages with their reasoning
+            const messageGroups = new Map();
+            
+            messages.forEach(msg => {
+                if (msg.message_type === 'user_message' || msg.message_type === 'assistant_message') {
+                    if (!messageGroups.has(msg.id)) {
+                        messageGroups.set(msg.id, { message: msg, reasoning: null, date: new Date(msg.date) });
+                    } else {
+                        messageGroups.get(msg.id).message = msg;
+                    }
+                } else if (msg.message_type === 'reasoning_message') {
+                    if (!messageGroups.has(msg.id)) {
+                        messageGroups.set(msg.id, { message: null, reasoning: msg, date: new Date(msg.date) });
+                    } else {
+                        messageGroups.get(msg.id).reasoning = msg;
+                    }
+                }
+            });
+            
+            // Sort messages by date
+            const sortedGroups = Array.from(messageGroups.values())
+                .sort((a, b) => a.date - b.date);
+            
+            // Build the chat content
+            const content = sortedGroups
+                .map(group => {
+                    const msg = group.message;
+                    if (!msg) return '';
+                    
+                    const timestamp = new Date(msg.date).toLocaleString();
+                    
+                    if (msg.message_type === 'user_message') {
+                        return `
+                            <div class="message user-message">
+                                ${msg.content}
+                                <div class="message-timestamp">Sent: ${timestamp}</div>
+                            </div>
+                        `;
+                    }
+                    
+                    if (msg.message_type === 'assistant_message') {
+                        const reasoning = group.reasoning;
+                        const agentName = activeAgents.get(agentId)?.name || 'Assistant';
+                        
+                        return `
+                            <div class="message assistant-message">
+                                ${reasoning ? `<div class="reasoning-message">${reasoning.reasoning}</div>` : ''}
+                                <strong>${agentName}:</strong> ${msg.content}
+                                <div class="message-timestamp">Received: ${timestamp}</div>
+                            </div>
+                        `;
+                    }
+                    
+                    return '';
+                })
+                .filter(html => html !== '')
+                .join('');
+
+            // Only update if content has changed
+            if (chatWindow.innerHTML !== content) {
+                chatWindow.innerHTML = content;
+                chatWindow.scrollTop = chatWindow.scrollHeight;
+            }
+        }
+
+        /**
+         * Fetches the list of available agents from the server
+         * @async
+         */
+        async function fetchAgents() {
+                try {
+                    const response = await fetch(`${endpoint}/agents`);
+                    if (!response.ok) throw new Error('Failed to fetch agents');
+                
+                    const agents = await response.json();
+                    // Sort agents alphabetically by name
+                    agents.sort((a, b) => a.name.localeCompare(b.name));
+                
+                    const agentSelect = document.getElementById('agent-select');
+                    agentSelect.innerHTML = '<option value="">Select an agent...</option>' + 
+                        agents.map(agent => `
+                            <option value="${agent.id}" data-name="${agent.name}">
+                                ${agent.name} (${agent.id})
+                            </option>
+                        `).join('');
+                } catch (error) {
+                    console.error('Error fetching agents:', error);
+                }
+            }
+
+            /**
+             * Toggles between dark and light themes
+             */
+            function toggleTheme() {
+                const body = document.body;
+                if (body.classList.contains('light-theme')) {
+                    body.classList.remove('light-theme');
+                    localStorage.setItem('theme', 'dark');
+                } else {
+                    body.classList.add('light-theme');
+                    localStorage.setItem('theme', 'light');
+                }
+            }
+
+        document.addEventListener('DOMContentLoaded', () => {
+            /**
+             * Initializes the page state and sets up event listeners
+             */
+            function initializePage() {
+                // Set initial theme
+                const savedTheme = localStorage.getItem('theme') || 'dark';
+                document.body.classList.toggle('light-theme', savedTheme === 'light');
+            
+                document.getElementById('proxy-input').value = endpoint;
+                validateEndpoint();
+            }
+
+            const pollingIntervals = new Map();
+
+            // Clean up intervals when page is unloaded
+            window.addEventListener('beforeunload', () => {
+                pollingIntervals.forEach((interval, agentId) => {
+                    clearInterval(interval);
+                });
+            });
+          
+            // Initialize the page
+            initializePage();
+        });
+    </script>
+</body>
+</html>
