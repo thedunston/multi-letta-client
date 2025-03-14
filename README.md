@@ -1,12 +1,14 @@
 # multi-letta-client
 
-### Status: Actively supported.
+**Status: Actively supported.**
 
 Pair programmed with AI to help with CSS and JS bugs. 
 
 ## Intro
 
 Displays multiple letta agents, refreshes the messages sent between agents, and allows sending messages.
+
+**Motivation**: While learning to create multipl-agent workflows with Letta, I wanted to see each agent on one screen.
 
 ## Setup
 
